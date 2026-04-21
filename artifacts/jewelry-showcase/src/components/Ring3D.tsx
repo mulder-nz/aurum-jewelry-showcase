@@ -9,20 +9,28 @@ interface Ring3DProps {
   glbUrl: string;      // URL to .glb or .gltf file
 }
 
-// Determines if a mesh/group belongs to a stone or metal part
-// Checks the mesh name AND all ancestor group names up the hierarchy
+// Determines if a mesh/group belongs to a stone or metal part.
+// Primary convention: groups named "Gem 01"–"Gem 04" and "Metal 01"–"Metal 04".
+// Walks the full ancestor chain so deeply-nested meshes inherit their group's classification.
 function classifyNode(object: THREE.Object3D): 'gem' | 'metal' {
-  const GEM_KEYWORDS = /gem|stone|diamond|crystal|sapphire|ruby|emerald|topaz|pearl|opal|amethyst/i;
-  const METAL_KEYWORDS = /metal|gold|silver|platinum|band|prong|setting|shank|shoulder|ring|base|frame|pave|pavé/i;
+  // Primary: starts with "Gem" or "Metal" (covers "Gem 01", "Gem 02", "Metal 01", etc.)
+  const PRIMARY_GEM   = /^gem\b/i;
+  const PRIMARY_METAL = /^metal\b/i;
 
-  // Walk up the hierarchy
+  // Fallback: broader material keywords for non-standard naming
+  const FALLBACK_GEM   = /stone|diamond|crystal|sapphire|ruby|topaz|pearl|opal|amethyst/i;
+  const FALLBACK_METAL = /gold|silver|platinum|band|prong|setting|shank|shoulder|base|frame|pav/i;
+
   let node: THREE.Object3D | null = object;
   while (node) {
-    if (GEM_KEYWORDS.test(node.name)) return 'gem';
-    if (METAL_KEYWORDS.test(node.name)) return 'metal';
+    const n = node.name;
+    if (PRIMARY_GEM.test(n))   return 'gem';
+    if (PRIMARY_METAL.test(n)) return 'metal';
+    if (FALLBACK_GEM.test(n))   return 'gem';
+    if (FALLBACK_METAL.test(n)) return 'metal';
     node = node.parent;
   }
-  return 'metal'; // default
+  return 'metal'; // safe default
 }
 
 // Build gem material based on cut type

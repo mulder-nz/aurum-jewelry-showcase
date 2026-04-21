@@ -1,296 +1,312 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 interface Ring3DProps {
   metalColor: string;
-  stoneCut: string;
-  scrollProgress?: number;
+  stoneCut: string;    // "round" | "emerald" — drives gem material properties
+  glbUrl: string;      // URL to .glb or .gltf file
 }
 
-export function Ring3D({ metalColor, stoneCut, scrollProgress = 0 }: Ring3DProps) {
+// Determines if a mesh/group belongs to a stone or metal part
+// Checks the mesh name AND all ancestor group names up the hierarchy
+function classifyNode(object: THREE.Object3D): 'gem' | 'metal' {
+  const GEM_KEYWORDS = /gem|stone|diamond|crystal|sapphire|ruby|emerald|topaz|pearl|opal|amethyst/i;
+  const METAL_KEYWORDS = /metal|gold|silver|platinum|band|prong|setting|shank|shoulder|ring|base|frame|pave|pavé/i;
+
+  // Walk up the hierarchy
+  let node: THREE.Object3D | null = object;
+  while (node) {
+    if (GEM_KEYWORDS.test(node.name)) return 'gem';
+    if (METAL_KEYWORDS.test(node.name)) return 'metal';
+    node = node.parent;
+  }
+  return 'metal'; // default
+}
+
+// Build gem material based on cut type
+function makeGemMaterial(stoneCut: string): THREE.MeshPhysicalMaterial {
+  const isEmerald = stoneCut === 'emerald';
+  return new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(isEmerald ? '#c8f0e8' : '#f0f8ff'),
+    metalness: 0,
+    roughness: 0,
+    transmission: isEmerald ? 0.90 : 0.97,
+    thickness: isEmerald ? 1.2 : 0.5,
+    ior: isEmerald ? 1.58 : 2.42,
+    clearcoat: 1,
+    clearcoatRoughness: 0,
+    reflectivity: 1,
+    envMapIntensity: isEmerald ? 3 : 5,
+    attenuationColor: new THREE.Color(isEmerald ? '#80ffcc' : '#c8e8ff'),
+    attenuationDistance: isEmerald ? 0.8 : 0.4,
+  });
+}
+
+// Build gold/metal material
+function makeMetalMaterial(hexColor: string): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({
+    color: new THREE.Color(hexColor),
+    metalness: 0.95,
+    roughness: 0.12,
+    envMapIntensity: 2.5,
+  });
+}
+
+export function Ring3D({ metalColor, stoneCut, glbUrl }: Ring3DProps) {
   const mountRef = useRef<HTMLDivElement>(null);
+
+  // Live refs — animation loop reads these without re-running the effect
   const metalColorRef = useRef(metalColor);
   const stoneCutRef = useRef(stoneCut);
-  const scrollRef = useRef(scrollProgress);
-
+  const glbUrlRef = useRef(glbUrl);
   metalColorRef.current = metalColor;
   stoneCutRef.current = stoneCut;
-  scrollRef.current = scrollProgress;
+  glbUrlRef.current = glbUrl;
 
+  // Refs shared between scene-init and content effects
+  const ringGroupRef = useRef<THREE.Group | null>(null);
+  const gemMaterialRef = useRef<THREE.MeshPhysicalMaterial | null>(null);
+  const metalMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
+
+  // ── Effect 1: Scene, camera, lights, renderer, controls — initialised once ──
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
 
-    const width = mount.clientWidth;
-    const height = mount.clientHeight;
+    // WebGL availability check
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('webgl2') || canvas.getContext('webgl');
+    if (!ctx) return;
 
-    // Scene
-    const scene = new THREE.Scene();
-    scene.background = null;
-
-    // Camera
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
-    camera.position.set(0, 1.5, 6);
-    camera.lookAt(0, 0.3, 0);
-
-    // Check WebGL support before initializing
-    const testCanvas = document.createElement('canvas');
-    const testCtx = testCanvas.getContext('webgl2') || testCanvas.getContext('webgl');
-    if (!testCtx) return;
-
-    // Renderer — reuse the tested canvas
     let renderer: THREE.WebGLRenderer;
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, canvas: testCanvas });
-    } catch {
-      return;
-    }
-    mount.appendChild(testCanvas);
-    renderer.setSize(width, height);
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, canvas });
+    } catch { return; }
+
+    const w = mount.clientWidth, h = mount.clientHeight;
+    renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.4;
-    mount.appendChild(renderer.domElement);
+    renderer.toneMappingExposure = 1.8;
+    mount.appendChild(canvas);
 
-    // Lighting — cinematic jewelry setup
-    const ambientLight = new THREE.AmbientLight(0xfff1e6, 0.3);
-    scene.add(ambientLight);
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#1a1713');
 
-    const keyLight = new THREE.DirectionalLight(0xffffff, 3.5);
-    keyLight.position.set(5, 8, 5);
-    keyLight.castShadow = true;
-    keyLight.shadow.mapSize.width = 2048;
-    keyLight.shadow.mapSize.height = 2048;
-    scene.add(keyLight);
+    const camera = new THREE.PerspectiveCamera(38, w / h, 0.01, 200);
+    camera.position.set(0, 0.5, 7);
 
-    const fillLight = new THREE.DirectionalLight(0xfff1e6, 1.5);
-    fillLight.position.set(-4, 4, -3);
-    scene.add(fillLight);
+    // ── Lighting: bright cinematic jewelry setup ──
+    scene.add(new THREE.AmbientLight(0xfff5e0, 1.8));
 
-    const rimLight = new THREE.PointLight(0xffd700, 2.5, 15);
-    rimLight.position.set(0, 4, -4);
-    scene.add(rimLight);
+    const key = new THREE.DirectionalLight(0xffffff, 8);
+    key.position.set(5, 8, 5);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    scene.add(key);
 
-    const bottomLight = new THREE.PointLight(0x8888ff, 0.8, 10);
-    bottomLight.position.set(0, -3, 2);
-    scene.add(bottomLight);
+    const fill = new THREE.DirectionalLight(0xfff0d0, 4);
+    fill.position.set(-5, 3, -3);
+    scene.add(fill);
 
-    const sparkle1 = new THREE.PointLight(0xffffff, 3, 8);
-    sparkle1.position.set(2, 2, 3);
-    scene.add(sparkle1);
+    const front = new THREE.DirectionalLight(0xffffff, 3);
+    front.position.set(0, 0, 8);
+    scene.add(front);
 
-    // Materials
-    const createGoldMaterial = (color: string) => new THREE.MeshStandardMaterial({
-      color: new THREE.Color(color),
-      metalness: 0.97,
-      roughness: 0.04,
-      envMapIntensity: 1.8,
-    });
+    const rim = new THREE.PointLight(0xffd700, 5, 20);
+    rim.position.set(0, 6, -5);
+    scene.add(rim);
 
-    const diamondMaterial = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color('#f0f8ff'),
-      metalness: 0,
-      roughness: 0,
-      transmission: 0.98,
-      thickness: 0.6,
-      ior: 2.42,
-      clearcoat: 1,
-      clearcoatRoughness: 0,
-      reflectivity: 1,
-      envMapIntensity: 4,
-    });
+    const under = new THREE.PointLight(0x8899ff, 1.2, 15);
+    under.position.set(0, -4, 3);
+    scene.add(under);
 
-    // PMREMGenerator for environment
-    const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    pmremGenerator.compileEquirectangularShader();
+    const sparkle = new THREE.PointLight(0xffffff, 6, 12);
+    sparkle.position.set(3, 2, 4);
+    scene.add(sparkle);
 
-    // Create a studio-like environment using gradient colors
+    // ── Environment map for reflections ──
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    pmrem.compileEquirectangularShader();
     const envScene = new THREE.Scene();
-    const envGeo = new THREE.SphereGeometry(10, 32, 32);
-    const envMat = new THREE.ShaderMaterial({
-      side: THREE.BackSide,
-      vertexShader: `
-        varying vec3 vWorldPosition;
-        void main() {
-          vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-          vWorldPosition = worldPosition.xyz;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        varying vec3 vWorldPosition;
-        void main() {
-          float y = normalize(vWorldPosition).y;
-          vec3 topColor = vec3(0.2, 0.18, 0.15);
-          vec3 midColor = vec3(0.08, 0.07, 0.06);
-          vec3 botColor = vec3(0.04, 0.03, 0.04);
-          vec3 col = y > 0.0 ? mix(midColor, topColor, y) : mix(midColor, botColor, -y);
-          // Add warm highlight at top
-          col += vec3(0.3, 0.2, 0.1) * max(0.0, y - 0.5);
-          gl_FragColor = vec4(col, 1.0);
-        }
-      `,
-    });
-    const envMesh = new THREE.Mesh(envGeo, envMat);
-    envScene.add(envMesh);
-    const envMap = pmremGenerator.fromScene(envScene).texture;
-    scene.environment = envMap;
+    envScene.add(new THREE.Mesh(
+      new THREE.SphereGeometry(10, 32, 32),
+      new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        vertexShader: `
+          varying vec3 vPos;
+          void main() { vPos = (modelMatrix * vec4(position,1.0)).xyz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+        `,
+        fragmentShader: `
+          varying vec3 vPos;
+          void main() {
+            float y = normalize(vPos).y;
+            vec3 top = vec3(0.25, 0.22, 0.18);
+            vec3 mid = vec3(0.09, 0.08, 0.07);
+            vec3 bot = vec3(0.04, 0.03, 0.04);
+            vec3 col = y > 0.0 ? mix(mid, top, y) : mix(mid, bot, -y);
+            col += vec3(0.35, 0.22, 0.08) * max(0.0, y - 0.4);
+            gl_FragColor = vec4(col, 1.0);
+          }
+        `,
+      })
+    ));
+    scene.environment = pmrem.fromScene(envScene).texture;
 
-    // Ring Group
+    // Ring group — populated by Effect 2
     const ringGroup = new THREE.Group();
-    ringGroup.position.y = 0;
     scene.add(ringGroup);
+    ringGroupRef.current = ringGroup;
 
-    let goldMaterial = createGoldMaterial(metalColorRef.current);
-
-    // Band
-    const bandGeo = new THREE.TorusGeometry(1.2, 0.13, 48, 120);
-    const band = new THREE.Mesh(bandGeo, goldMaterial);
-    band.rotation.x = Math.PI / 2;
-    band.castShadow = true;
-    ringGroup.add(band);
-
-    // Setting base (cathedral shoulders)
-    const settingGeo = new THREE.CylinderGeometry(0.5, 0.7, 0.5, 8, 1);
-    const setting = new THREE.Mesh(settingGeo, goldMaterial);
-    setting.position.y = 1.05;
-    setting.castShadow = true;
-    ringGroup.add(setting);
-
-    // Shoulder details
-    const shoulderLeft = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 0.6, 6), goldMaterial);
-    shoulderLeft.position.set(-0.8, 0.6, 0);
-    shoulderLeft.rotation.z = Math.PI / 6;
-    ringGroup.add(shoulderLeft);
-
-    const shoulderRight = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, 0.6, 6), goldMaterial);
-    shoulderRight.position.set(0.8, 0.6, 0);
-    shoulderRight.rotation.z = -Math.PI / 6;
-    ringGroup.add(shoulderRight);
-
-    // Prongs (4 prongs around center stone)
-    const prongGeo = new THREE.CylinderGeometry(0.05, 0.04, 0.8, 8);
-    const prongPositions = [
-      [0.35, 1.4, 0.35], [-0.35, 1.4, 0.35],
-      [0.35, 1.4, -0.35], [-0.35, 1.4, -0.35],
-    ];
-    prongPositions.forEach(([x, y, z]) => {
-      const prong = new THREE.Mesh(prongGeo, goldMaterial);
-      prong.position.set(x, y, z);
-      prong.rotation.x = x > 0 ? 0.3 : -0.3;
-      prong.rotation.z = z > 0 ? 0.3 : -0.3;
-      ringGroup.add(prong);
-    });
-
-    // Center diamond stone
-    let stoneGeo: THREE.BufferGeometry;
-    if (stoneCutRef.current === 'emerald') {
-      stoneGeo = new THREE.CylinderGeometry(0.5, 0.4, 0.45, 8);
-    } else {
-      stoneGeo = new THREE.IcosahedronGeometry(0.58, 3);
-      // Scale to flatter diamond shape
-      const posAttr = stoneGeo.attributes.position;
-      for (let i = 0; i < posAttr.count; i++) {
-        posAttr.setY(i, posAttr.getY(i) * 0.65);
-      }
-      posAttr.needsUpdate = true;
-      stoneGeo.computeVertexNormals();
-    }
-    const stone = new THREE.Mesh(stoneGeo, diamondMaterial);
-    stone.position.y = 1.42;
-    stone.castShadow = true;
-    ringGroup.add(stone);
-
-    // Side accent stones along band top
-    const sideStoneGeo = new THREE.IcosahedronGeometry(0.08, 1);
-    for (let i = 0; i < 8; i++) {
-      const angle = ((i - 3.5) / 7) * Math.PI * 0.8;
-      const x = Math.sin(angle) * 1.2;
-      const z = Math.cos(angle) * 1.2;
-      const sideStone = new THREE.Mesh(sideStoneGeo, diamondMaterial);
-      sideStone.position.set(x, 0.13, z);
-      ringGroup.add(sideStone);
-    }
-
-    // Pedestal shadow plane
-    const shadowPlane = new THREE.Mesh(
-      new THREE.PlaneGeometry(8, 8),
-      new THREE.ShadowMaterial({ opacity: 0.35 })
+    // Shadow plane
+    const shadow = new THREE.Mesh(
+      new THREE.PlaneGeometry(12, 12),
+      new THREE.ShadowMaterial({ opacity: 0.4 })
     );
-    shadowPlane.rotation.x = -Math.PI / 2;
-    shadowPlane.position.y = -1.4;
-    shadowPlane.receiveShadow = true;
-    scene.add(shadowPlane);
+    shadow.rotation.x = -Math.PI / 2;
+    shadow.position.y = -3;
+    shadow.receiveShadow = true;
+    scene.add(shadow);
 
-    // Controls
+    // ── Controls: orbit + zoom ──
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableZoom = false;
-    controls.enablePan = false;
-    controls.minPolarAngle = Math.PI / 5;
-    controls.maxPolarAngle = Math.PI / 1.8;
-    controls.autoRotate = true;
-    controls.autoRotateSpeed = 0.7;
     controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
+    controls.dampingFactor = 0.06;
+    controls.enableZoom = true;
+    controls.zoomSpeed = 0.8;
+    controls.minDistance = 1;
+    controls.maxDistance = 30;
+    controls.enablePan = false;
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.5;
+    controls.minPolarAngle = Math.PI / 6;
+    controls.maxPolarAngle = Math.PI / 1.6;
 
-    // Animation
-    let frameId: number;
-    let time = 0;
-
+    // ── Animate ──
+    let raf: number;
+    let t = 0;
     const animate = () => {
-      frameId = requestAnimationFrame(animate);
-      time += 0.016;
+      raf = requestAnimationFrame(animate);
+      t += 0.016;
 
-      // Metal color update
-      const currentColor = metalColorRef.current;
-      (goldMaterial as THREE.MeshStandardMaterial).color.set(currentColor);
+      // Live material color updates
+      if (metalMaterialRef.current) {
+        metalMaterialRef.current.color.set(metalColorRef.current);
+      }
 
-      // Scroll-based tilt
-      const scroll = scrollRef.current;
-      ringGroup.rotation.x = THREE.MathUtils.lerp(ringGroup.rotation.x, scroll * Math.PI * 0.3, 0.04);
-      ringGroup.position.y = THREE.MathUtils.lerp(ringGroup.position.y, scroll * -1.5, 0.04);
-
-      // Float bob
-      ringGroup.position.y += Math.sin(time * 0.8) * 0.008;
-
-      // Sparkle light movement for caustics effect
-      sparkle1.position.x = Math.sin(time * 1.2) * 2;
-      sparkle1.position.z = Math.cos(time * 0.8) * 3;
-      sparkle1.intensity = 2.5 + Math.sin(time * 3) * 0.8;
-
-      rimLight.position.x = Math.sin(time * 0.5) * 2;
-      rimLight.intensity = 2 + Math.sin(time * 2) * 0.5;
+      // Subtle sparkle caustics
+      sparkle.position.x = Math.sin(t * 1.1) * 3;
+      sparkle.position.z = Math.cos(t * 0.7) * 4;
+      sparkle.intensity = 3.5 + Math.sin(t * 2.8) * 1;
+      rim.position.x = Math.sin(t * 0.45) * 2;
+      rim.intensity = 2.5 + Math.sin(t * 1.8) * 0.6;
 
       controls.update();
       renderer.render(scene, camera);
     };
     animate();
 
-    // Resize
-    const handleResize = () => {
-      if (!mount) return;
-      const w = mount.clientWidth;
-      const h = mount.clientHeight;
-      camera.aspect = w / h;
+    // ── Resize ──
+    const onResize = () => {
+      const nw = mount.clientWidth, nh = mount.clientHeight;
+      camera.aspect = nw / nh;
       camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
+      renderer.setSize(nw, nh);
     };
-    window.addEventListener('resize', handleResize);
+    window.addEventListener('resize', onResize);
 
     return () => {
-      cancelAnimationFrame(frameId);
-      window.removeEventListener('resize', handleResize);
+      ringGroupRef.current = null;
+      gemMaterialRef.current = null;
+      metalMaterialRef.current = null;
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', onResize);
       controls.dispose();
       renderer.dispose();
-      pmremGenerator.dispose();
-      if (mount.contains(testCanvas)) {
-        mount.removeChild(testCanvas);
-      }
+      pmrem.dispose();
+      if (mount.contains(canvas)) mount.removeChild(canvas);
     };
   }, []);
+
+  // ── Effect 2: Load / reload model whenever glbUrl or stoneCut changes ──
+  useEffect(() => {
+    const ringGroup = ringGroupRef.current;
+    if (!ringGroup) return;
+
+    // Clear previous model
+    const old: THREE.Object3D[] = [];
+    ringGroup.traverse(o => { if (o !== ringGroup) old.push(o); });
+    ringGroup.clear();
+    old.forEach(o => {
+      if ((o as THREE.Mesh).geometry) (o as THREE.Mesh).geometry.dispose();
+    });
+    gemMaterialRef.current?.dispose();
+    metalMaterialRef.current?.dispose();
+    gemMaterialRef.current = null;
+    metalMaterialRef.current = null;
+
+    if (!glbUrl) return;
+
+    const gemMat = makeGemMaterial(stoneCutRef.current);
+    const metalMat = makeMetalMaterial(metalColorRef.current);
+    gemMaterialRef.current = gemMat;
+    metalMaterialRef.current = metalMat;
+
+    const loader = new GLTFLoader();
+    loader.load(
+      glbUrl,
+      (gltf) => {
+        const model = gltf.scene;
+
+        // Auto-centre and scale to fit view
+        const box = new THREE.Box3().setFromObject(model);
+        const centre = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        model.position.sub(centre);
+        model.scale.setScalar(3.5 / maxDim);
+
+        // Log layer names to console for debugging
+        model.children.forEach(child => {
+          console.log('[Ring3D] group:', child.name, '→', classifyNode(child));
+        });
+
+        // Classify every mesh and apply materials
+        model.traverse(child => {
+          if (!(child as THREE.Mesh).isMesh) return;
+          const mesh = child as THREE.Mesh;
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+
+          const type = classifyNode(mesh);
+          mesh.material = type === 'gem' ? gemMat : metalMat;
+        });
+
+        ringGroup.add(model);
+      },
+      undefined,
+      (err) => console.error('[Ring3D] load error:', err)
+    );
+  }, [glbUrl, stoneCut]);
+
+  // ── Effect 3: Update gem material when stoneCut changes (without reloading) ──
+  useEffect(() => {
+    const gem = gemMaterialRef.current;
+    if (!gem) return;
+    const isEmerald = stoneCut === 'emerald';
+    gem.color.set(isEmerald ? '#c8f0e8' : '#f0f8ff');
+    gem.transmission = isEmerald ? 0.90 : 0.97;
+    gem.thickness = isEmerald ? 1.2 : 0.5;
+    gem.ior = isEmerald ? 1.58 : 2.42;
+    gem.envMapIntensity = isEmerald ? 3 : 5;
+    gem.attenuationColor.set(isEmerald ? '#80ffcc' : '#c8e8ff');
+    gem.attenuationDistance = isEmerald ? 0.8 : 0.4;
+    gem.needsUpdate = true;
+  }, [stoneCut]);
 
   return <div ref={mountRef} className="w-full h-full" />;
 }

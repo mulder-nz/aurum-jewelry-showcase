@@ -106,7 +106,7 @@ export function Ring3D({ metalColor, stoneCut, glbUrl }: Ring3DProps) {
     scene.background = new THREE.Color('#1a1713');
 
     const camera = new THREE.PerspectiveCamera(38, w / h, 0.01, 200);
-    camera.position.set(0, 0.5, 7);
+    camera.position.set(0, 0, 7);
 
     // ── Lighting: bright cinematic jewelry setup ──
     scene.add(new THREE.AmbientLight(0xfff5e0, 1.8));
@@ -193,6 +193,7 @@ export function Ring3D({ metalColor, stoneCut, glbUrl }: Ring3DProps) {
     controls.autoRotateSpeed = 0.5;
     controls.minPolarAngle = Math.PI / 6;
     controls.maxPolarAngle = Math.PI / 1.6;
+    controls.target.set(0, 0, 0); // always orbit around world origin
 
     // ── Animate ──
     let raf: number;
@@ -270,13 +271,21 @@ export function Ring3D({ metalColor, stoneCut, glbUrl }: Ring3DProps) {
       (gltf) => {
         const model = gltf.scene;
 
-        // Auto-centre and scale to fit view
+        // Auto-centre and scale to fit view.
+        // Order matters: compute local-space bounding box first, apply scale,
+        // then offset position by -(localCentre * scale) so world centre = (0,0,0).
+        model.updateMatrixWorld(true);
         const box = new THREE.Box3().setFromObject(model);
-        const centre = box.getCenter(new THREE.Vector3());
+        const localCentre = box.getCenter(new THREE.Vector3());
         const size = box.getSize(new THREE.Vector3());
         const maxDim = Math.max(size.x, size.y, size.z);
-        model.position.sub(centre);
-        model.scale.setScalar(3.5 / maxDim);
+        const scale = 3.5 / maxDim;
+        model.scale.setScalar(scale);
+        model.position.set(
+          -localCentre.x * scale,
+          -localCentre.y * scale,
+          -localCentre.z * scale,
+        );
 
         // Log layer names to console for debugging
         model.children.forEach(child => {
